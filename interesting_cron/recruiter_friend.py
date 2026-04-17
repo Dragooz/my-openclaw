@@ -1,0 +1,2 @@
+1. "Quiet Firing" Detector
+Bot monitors LinkedIn for employees whose titles haven't changed in 3+ years at the same company, cross-referenced with company layoff news. Sell the list to recruiters. These people are ready to leave but haven't moved yet.

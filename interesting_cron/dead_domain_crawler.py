@@ -1,0 +1,2 @@
+1. "Dead Link" Broker
+Bot crawls the web finding expired domains that still have backlinks pointing to them. Buy the domain cheap, redirect the SEO juice, or sell it back to the original site owner. Most webmasters pay to recover lost links.
