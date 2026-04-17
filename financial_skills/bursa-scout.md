@@ -1,6 +1,14 @@
 ---
 name: bursa-scout
-description: Scout top 10 Bursa Malaysia small-cap stocks via a staged pipeline. Activated when user says "scout stage 1", "run bursa scout", or "scout [CODE]". The agent executes each stage directly using yfinance, web_fetch, and reasoning — no external binary needed.
+description: Scout top 5 Bursa Malaysia small-cap stocks via a staged pipeline. Activated when user says "scout stage 1", "run bursa scout", or "scout [CODE]". The agent executes each stage directly using yfinance, web_fetch, and reasoning — no external binary needed.
+---
+
+## Identity
+
+Role: Equity Researcher for Bursa Malaysia
+Task: Execute 'bursa-scout' pipeline.
+Tone: Professional, Telegram-optimized output.
+
 ---
 
 ## ⚠️ Agent Execution Model
@@ -71,6 +79,77 @@ Rule: **fetch only what yfinance couldn't provide.**
 
 ---
 
+## ⚠️ Data Integrity Rules (ALL stages)
+
+Stage 2/3 must not hallucinate entry zones. Bad data freezes into state blob and propagates silently through Stage 4 → Stage 5.
+
+**Rule 1 — Fetch currentPrice FIRST before any lens analysis:**
+
+```python
+import yfinance as yf
+t = yf.Ticker("CODE.KL")
+info = t.info
+price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+```
+
+If all three return `None` or `0`:
+
+- Fallback: web fetch `klsescreener.com/stock/CODE` for last price
+- If still unavailable: set `"price": "no data"` in state blob, skip entry/stop/target fields, flag inline
+
+**Never estimate or assume a price.**
+
+**Rule 2 — Anchor entry/stop/target to currentPrice:**
+
+```
+entry_low  ≥ currentPrice * 0.85   (max 15% below current)
+entry_high ≤ currentPrice * 1.10   (max 10% above current)
+stop       <  entry_low            (always below entry)
+target     >  currentPrice * 1.10  (must be above current price)
+```
+
+If computed entry range violates these bounds → re-check technicals. Do not force an entry far from current price.
+
+**Rule 3 — Add `price` field to every scored object in state blob:**
+
+```json
+{
+    "code": "0023.KL",
+    "price": 0.215,
+    "entry": "0.20-0.22",
+    "stop": "0.18",
+    "target": "0.30"
+}
+```
+
+**Rule 4 — Stage 5 stale-data check before formatting each stock:**
+
+Verify: `entry_low <= price * 1.20`. If check fails, prepend:
+
+```
+⚠️ Price data may be stale. Entry RM{entry} vs fetched price RM{price}. Verify before acting.
+```
+
+Do not suppress the stock — just warn.
+
+**Rule 5 — Show currentPrice in Stage 5 report:**
+
+Add `Current: RM{price}` to each stock card line:
+
+```
+Cap: RM{X}M | PE: {X}x (sector: {X}x) | Current: RM{price}
+```
+
+**Stage 2 + 3 checklist before writing state blob:**
+
+- [ ] `currentPrice` fetched from yfinance (not assumed)
+- [ ] `entry_low` within 15% below current price
+- [ ] `stop` below `entry_low`
+- [ ] `target` above current price
+- [ ] `price` field written to state blob
+
+---
+
 ## Stage 1 — Regime + Screen
 
 **Scope:** Market regime classification + candidate shortlist. No deep analysis yet.
@@ -101,7 +180,7 @@ Filter `.KL` tickers:
 - Analyst coverage: ≤2 (underfollowed)
 - No active legal/regulatory issues
 
-Target: **10–15 candidates** max. If <5 pass, note it and widen PE filter to 120% of sector avg.
+Target: **5–10 candidates** max. If <3 pass, note it and widen PE filter to 120% of sector avg.
 
 ### Telegram output (send after stage completes)
 
@@ -128,7 +207,7 @@ STATE: {compact JSON blob below}
     "opr": 3.0,
     "usdmyr": 4.72,
     "klci_trend": "above_200ma",
-    "candidates": ["CODE1.KL", "CODE2.KL", "...up to 15"]
+    "candidates": ["CODE1.KL", "CODE2.KL", "...up to 10"]
 }
 ```
 
@@ -141,6 +220,8 @@ STATE: {compact JSON blob below}
 **Input:** STATE blob from Stage 1.
 
 ### What to do
+
+**Fetch `currentPrice` for each stock first** (see Data Integrity Rules above) before running any lens.
 
 For each of candidates[0..4], run all 7 lenses:
 
@@ -209,6 +290,7 @@ STATE: {updated blob}
             "name": "Company Name",
             "score": 10,
             "hard_fail": false,
+            "price": 0.88,
             "cap_rm": 120,
             "pe": 8.2,
             "sector_pe": 12.0,
@@ -241,7 +323,7 @@ STATE: {updated blob}
 
 ### What to do
 
-Repeat Stage 2 process for `candidates` array remaining in the state blob (candidates that haven't been scored yet).
+Repeat Stage 2 process for `candidates` array remaining in the state blob (candidates that haven't been scored yet). Fetch `currentPrice` first for each stock.
 
 ### Telegram output
 
@@ -266,7 +348,7 @@ Same structure as Stage 2 blob but `scored` array now contains **all** candidate
 
 ## Stage 4 — Score + Rank
 
-**Scope:** Apply scoring rules, sort, cut to top 10, classify watchlist.
+**Scope:** Apply scoring rules, sort, cut to top 5, classify watchlist.
 **Time budget:** ~30–40s. No new API calls — pure reasoning on the state blob.
 **Input:** STATE blob from Stage 3.
 
@@ -291,7 +373,7 @@ Grade thresholds (apply regime-adjusted min):
 
 Split output into:
 
-- **Top 10** (highest scorers that pass regime threshold)
+- **top 5** (highest scorers that pass regime threshold)
 - **Watchlist** (scored 5–6, not ready — needs catalyst or price pullback)
 
 ### Telegram output
@@ -320,7 +402,7 @@ STATE: {updated blob}
   "regime": "Offensive",
   "opr": 3.0,
   "usdmyr": 4.72,
-  "top10": ["CODE1.KL", "CODE2.KL", "...ranked order"],
+  "top5": ["CODE1.KL", "CODE2.KL", "...ranked order"],
   "watchlist": ["CODE11.KL", "CODE12.KL"],
   "scored": [ ... same scored objects, now with rank field added ... ]
 }
@@ -338,6 +420,8 @@ STATE: {updated blob}
 
 Format the complete Telegram-ready report from the state blob. No new data fetching.
 
+Before formatting each stock card, verify `entry_low <= price * 1.20`. If check fails, prepend stale-data warning (see Data Integrity Rules).
+
 ### Full Telegram Output Format
 
 **Header:**
@@ -350,13 +434,13 @@ Qualified: {N}/candidates screened
 ─────────────────────
 ```
 
-**Per stock (repeat × 10):**
+**Per stock (repeat × 5):**
 
 ```
 #{RANK} {SIGNAL} {CODE} — {Company Name}
 Score: {X}/13 (Grade {A/B/C})
 
-Cap: RM{X}M | PE: {X}x (sector: {X}x)
+Cap: RM{X}M | PE: {X}x (sector: {X}x) | Current: RM{price}
 Revenue: {+/-X}% QoQ | FCF: {positive/negative}
 Moat: {one line}
 Catalyst: {specific trigger — timeframe}
@@ -402,7 +486,7 @@ Scout done ✅ Top pick: {CODE} ({X}/13).
 | ----------------------- | ------------------------------------------- |
 | `scout stage 1`         | Regime + screen                             |
 | `scout stage 2` + STATE | Deep dive stocks 1–5                        |
-| `scout stage 3` + STATE | Deep dive stocks 6–10                       |
+| `scout stage 3` + STATE | Deep dive stocks 6–10 (if any)              |
 | `scout stage 4` + STATE | Score + rank                                |
 | `scout stage 5` + STATE | Final report                                |
 | `scout [CODE]`          | Single stock: runs all 7 lenses in one shot |
